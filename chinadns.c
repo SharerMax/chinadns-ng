@@ -106,7 +106,7 @@ static void print_command_help(void) {
            " -p, --repeat-times <repeat-times>    it is only used for trustdns, default: 1\n"
            " -M, --chnlist-first                  match chnlist first, default: <disabled>\n"
            " -f, --fair-mode                      enable `fair` mode, default: <fast-mode>\n"
-           " -R, --run-mode                  handle dns request for no hit list, default(chnroute)\n" 
+           " -R, --run-mode                       handle dns request for no hit list, default(chnroute)\n" 
            " -r, --reuse-port                     enable SO_REUSEPORT, default: <disabled>\n"
            " -n, --noip-as-chnip                  accept reply without ipaddr (A/AAAA query)\n"
            " -v, --verbose                        print the verbose log, default: <disabled>\n"
@@ -159,7 +159,7 @@ PRINT_HELP_AND_EXIT:
 
 /* parse and check command arguments */
 static void parse_command_args(int argc, char *argv[]) {
-    const char *optstr = ":b:l:c:t:4:6:g:m:o:p:M:R:frnvVh";
+    const char *optstr = ":b:l:c:t:4:6:g:m:o:p:R:MfrnvVh";
     const struct option options[] = {
         {"bind-addr",     required_argument, NULL, 'b'},
         {"bind-port",     required_argument, NULL, 'l'},
