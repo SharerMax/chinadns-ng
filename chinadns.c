@@ -43,6 +43,10 @@
 #define SOCKBUFF_MAXSIZE DNS_PACKET_MAXSIZE
 #define PORTSTR_MAXLEN 6 /* "65535\0" (including '\0') */
 #define ADDRPORT_STRLEN (INET6_ADDRSTRLEN + PORTSTR_MAXLEN) /* "addr#port\0" */
+#define RUN_CHNROUTE "chnroute"
+#define RUN_TRUST_DNS "trust-dns"
+#define RUN_CHINA_DNS "china-dns"
+#define RUN_MAXLENGTH 10
 #define CHINADNS_VERSION "ChinaDNS-NG v1.0-beta.22 <https://github.com/zfl9/chinadns-ng>"
 
 /* is enable verbose logging */
@@ -85,6 +89,7 @@ static uint16_t    g_current_unique_msgid                             = 0;
 static queryctx_t *g_query_context_hashtbl                            = NULL;
 static char        g_domain_name_buffer[DNS_DOMAIN_NAME_MAXLEN]       = {0};
 static char        g_ipaddrstring_buffer[INET6_ADDRSTRLEN]            = {0};
+static char        g_run_mode[RUN_MAXLENGTH]                = RUN_CHNROUTE; /* chnroute, trust-dns, china-dns */
 
 /* print command help information */
 static void print_command_help(void) {
@@ -101,6 +106,7 @@ static void print_command_help(void) {
            " -p, --repeat-times <repeat-times>    it is only used for trustdns, default: 1\n"
            " -M, --chnlist-first                  match chnlist first, default: <disabled>\n"
            " -f, --fair-mode                      enable `fair` mode, default: <fast-mode>\n"
+           " -R, --run-mode                  handle dns request for no hit list, default(chnroute)\n" 
            " -r, --reuse-port                     enable SO_REUSEPORT, default: <disabled>\n"
            " -n, --noip-as-chnip                  accept reply without ipaddr (A/AAAA query)\n"
            " -v, --verbose                        print the verbose log, default: <disabled>\n"
@@ -153,7 +159,7 @@ PRINT_HELP_AND_EXIT:
 
 /* parse and check command arguments */
 static void parse_command_args(int argc, char *argv[]) {
-    const char *optstr = ":b:l:c:t:4:6:g:m:o:p:MfrnvVh";
+    const char *optstr = ":b:l:c:t:4:6:g:m:o:p:M:R:frnvVh";
     const struct option options[] = {
         {"bind-addr",     required_argument, NULL, 'b'},
         {"bind-port",     required_argument, NULL, 'l'},
@@ -165,6 +171,7 @@ static void parse_command_args(int argc, char *argv[]) {
         {"chnlist-file",  required_argument, NULL, 'm'},
         {"timeout-sec",   required_argument, NULL, 'o'},
         {"repeat-times",  required_argument, NULL, 'p'},
+        {"run-mode",      required_argument, NULL, 'R'},
         {"chnlist-first", no_argument,       NULL, 'M'},
         {"fair-mode",     no_argument,       NULL, 'f'},
         {"reuse-port",    no_argument,       NULL, 'r'},
@@ -256,6 +263,14 @@ static void parse_command_args(int argc, char *argv[]) {
                 break;
             case 'f':
                 g_fair_mode = true;
+                break;
+            case 'R':
+                if (0 != strcmp(RUN_CHNROUTE, optarg) && 0 != strcmp(RUN_TRUST_DNS, optarg) && 0!= strcmp(RUN_CHINA_DNS, optarg))
+                {
+                    printf("[parse_command_args] %s mode no exist. available mode: chnroute, trust-dns, china-dns\n" , optarg);
+                    goto PRINT_HELP_AND_EXIT;
+                }
+                stpcpy(g_run_mode, optarg);
                 break;
             case 'r':
                 g_reuse_port = true;
@@ -397,7 +412,12 @@ static void handle_remote_packet(int index) {
     }
 
     bool is_chinadns = index == CHINADNS1_IDX || index == CHINADNS2_IDX;
-    bool is_accept = dns_reply_check(g_socket_buffer, packet_len, g_verbose ? g_domain_name_buffer : NULL, is_chinadns);
+    // reply packet legal and ip answer hit chnroute when it from china_dns
+    bool is_chroute_mode = 0 == strcmp(g_run_mode, RUN_CHNROUTE);
+    bool is_trust_dns_mode = 0 == strcmp(g_run_mode, RUN_TRUST_DNS);
+    bool is_china_dns_mode = 0 == strcmp(g_run_mode, RUN_CHINA_DNS);
+    bool need_check_chk = is_chroute_mode ? is_chinadns : false;
+    // bool is_accept = dns_reply_check(g_socket_buffer, packet_len, g_verbose ? g_domain_name_buffer : NULL, need_check_chk);
 
     queryctx_t *context = NULL;
     dns_header_t *dns_header = (dns_header_t *)g_socket_buffer;
@@ -411,16 +431,24 @@ static void handle_remote_packet(int index) {
     size_t reply_length = 0;
 
     if (is_chinadns) {
-        if (context->dnlmatch_ret == DNL_MRESULT_CHNLIST || is_accept) {
+        bool is_accept = dns_reply_check(g_socket_buffer, packet_len, g_verbose ? g_domain_name_buffer : NULL, need_check_chk);
+        is_accept = is_accept && (is_chroute_mode \
+                    || context->dnlmatch_ret == DNL_MRESULT_CHNLIST \
+                    || (is_china_dns_mode && (context->dnlmatch_ret == DNL_MRESULT_NOMATCH)));
+        
+        if (is_accept) {
             IF_VERBOSE LOGINF("[handle_remote_packet] reply [%s] from %s, result: accept", g_domain_name_buffer, remote_ipport);
+            // if trustdns has answer drop it
             if (context->trustdns_buf) {
                 IF_VERBOSE LOGINF("[handle_remote_packet] reply [%s] from <previous-trustdns>, result: filter", g_domain_name_buffer);
             }
             reply_buffer = g_socket_buffer;
             reply_length = packet_len;
             goto SEND_REPLY;
-        } else {
+        } else if(is_chroute_mode) {
+            // not in the CHNLIST and answer not in the chnroute
             IF_VERBOSE LOGINF("[handle_remote_packet] reply [%s] from %s, result: filter", g_domain_name_buffer, remote_ipport);
+            // if trustdns has answer use the answer
             if (context->trustdns_buf) {
                 IF_VERBOSE LOGINF("[handle_remote_packet] reply [%s] from <previous-trustdns>, result: accept", g_domain_name_buffer);
                 reply_buffer = context->trustdns_buf + sizeof(uint16_t);
@@ -432,12 +460,16 @@ static void handle_remote_packet(int index) {
             }
         }
     } else {
-        if (context->dnlmatch_ret == DNL_MRESULT_GFWLIST || context->chinadns_got) {
+        bool is_accept = dns_reply_check(g_socket_buffer, packet_len, g_verbose ? g_domain_name_buffer : NULL, false) &&  \
+                        (context->dnlmatch_ret == DNL_MRESULT_GFWLIST \
+                        || (is_trust_dns_mode && (context->dnlmatch_ret == DNL_MRESULT_NOMATCH)) \
+                        || (is_chroute_mode && context->chinadns_got));
+        if (is_accept) {
             IF_VERBOSE LOGINF("[handle_remote_packet] reply [%s] from %s, result: accept", g_domain_name_buffer, remote_ipport);
             reply_buffer = g_socket_buffer;
             reply_length = packet_len;
             goto SEND_REPLY;
-        } else {
+        } else if(is_chroute_mode) {
             if (context->trustdns_buf) {
                 IF_VERBOSE LOGINF("[handle_remote_packet] reply [%s] from %s, result: ignore", g_domain_name_buffer, remote_ipport);
             } else {
@@ -494,6 +526,7 @@ int main(int argc, char *argv[]) {
     if (g_gfwlist_fname) LOGINF("[main] gfwlist entries count: %zu", dnl_init(g_gfwlist_fname, true));
     if (g_chnlist_fname) LOGINF("[main] chnlist entries count: %zu", dnl_init(g_chnlist_fname, false));
     if (g_gfwlist_fname && g_chnlist_fname) LOGINF("[main] %s have higher priority", g_gfwlist_first ? "gfwlist" : "chnlist");
+    LOGINF("[main] run mode: %s", g_run_mode);
     if (g_repeat_times > 1) LOGINF("[main] enable repeat mode, times: %hhu", g_repeat_times);
     LOGINF("[main] %s reply without ip addr", g_noip_as_chnip ? "accept" : "filter");
     LOGINF("[main] cur judgment mode: %s mode", g_fair_mode ? "fair" : "fast");
