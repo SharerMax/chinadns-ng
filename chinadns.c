@@ -481,6 +481,7 @@ static void handle_remote_packet(int index) {
             return;
         }
     }
+    return;
 
 SEND_REPLY:
     dns_header = reply_buffer;
